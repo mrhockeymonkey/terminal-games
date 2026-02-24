@@ -1,6 +1,7 @@
 use protocol::{ClientMsg, Direction, PlayerState, ServerMsg, recv_msg, send_msg};
-use tokio::io::{ReadHalf, WriteHalf};
+use tokio::io::WriteHalf;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 
 const WIDTH: u16 = 80;
 const HEIGHT: u16 = 24;
@@ -62,9 +63,46 @@ async fn main() -> std::io::Result<()> {
     println!("[server] Sending initial GameState to both players");
     broadcast(&mut w0, &mut w1, &players).await?;
 
+    // Spawn reader tasks that feed into a shared channel
+    let (tx, mut rx) = mpsc::channel::<(u8, ClientMsg)>(32);
+    let tx0 = tx.clone();
+    let tx1 = tx;
+
+    tokio::spawn(async move {
+        loop {
+            match recv_msg::<_, ClientMsg>(&mut r0).await {
+                Ok(msg) => {
+                    if tx0.send((0, msg)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    println!("[server] Player 0 read error: {e}");
+                    break;
+                }
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        loop {
+            match recv_msg::<_, ClientMsg>(&mut r1).await {
+                Ok(msg) => {
+                    if tx1.send((1, msg)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    println!("[server] Player 1 read error: {e}");
+                    break;
+                }
+            }
+        }
+    });
+
     // Main game loop
     println!("[server] Entering game loop");
-    game_loop(&mut r0, &mut r1, &mut w0, &mut w1, &mut players).await
+    game_loop(&mut rx, &mut w0, &mut w1, &mut players).await
 }
 
 async fn broadcast(
@@ -98,44 +136,21 @@ fn apply_move(player: &mut PlayerState, dir: Direction) {
 }
 
 async fn game_loop(
-    r0: &mut ReadHalf<TcpStream>,
-    r1: &mut ReadHalf<TcpStream>,
+    rx: &mut mpsc::Receiver<(u8, ClientMsg)>,
     w0: &mut WriteHalf<TcpStream>,
     w1: &mut WriteHalf<TcpStream>,
     players: &mut [PlayerState; 2],
 ) -> std::io::Result<()> {
-    loop {
-        tokio::select! {
-            result = recv_msg::<_, ClientMsg>(r0) => {
-                match result {
-                    Ok(ClientMsg::Move(dir)) => {
-                        println!("[server] Player 0 moved {dir:?}");
-                        apply_move(&mut players[0], dir);
-                        broadcast(w0, w1, players).await?;
-                    }
-                    Err(e) => {
-                        println!("[server] Player 0 disconnected: {e}");
-                        let _ = send_msg(w1, &ServerMsg::OpponentDisconnected).await;
-                        break;
-                    }
-                }
-            }
-            result = recv_msg::<_, ClientMsg>(r1) => {
-                match result {
-                    Ok(ClientMsg::Move(dir)) => {
-                        println!("[server] Player 1 moved {dir:?}");
-                        apply_move(&mut players[1], dir);
-                        broadcast(w0, w1, players).await?;
-                    }
-                    Err(e) => {
-                        println!("[server] Player 1 disconnected: {e}");
-                        let _ = send_msg(w0, &ServerMsg::OpponentDisconnected).await;
-                        break;
-                    }
-                }
+    while let Some((player_id, msg)) = rx.recv().await {
+        match msg {
+            ClientMsg::Move(dir) => {
+                println!("[server] Player {player_id} moved {dir:?}");
+                apply_move(&mut players[player_id as usize], dir);
+                broadcast(w0, w1, players).await?;
             }
         }
     }
+    // Channel closed — at least one reader task exited (player disconnected)
     println!("[server] Game ended");
     Ok(())
 }
