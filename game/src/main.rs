@@ -375,6 +375,70 @@ fn write_hud_line(stdout: &mut io::Stdout, hud: &HudLine) -> io::Result<()> {
     Ok(())
 }
 
+fn display_lobby_screen(stdout: &mut io::Stdout, player_id: u8, joined: u8, needed: u8) -> io::Result<()> {
+    let logo = [
+        r":::::::::   ::::::::  ::::    ::::  :::::::::   :::::::: ",
+        r":+:    :+: :+:    :+: +:+:+: :+:+:+ :+:    :+: :+:    :+:",
+        r"+:+    +:+ +:+    +:+ +:+ +:+:+ +:+ +:+    +:+ +:+       ",
+        r"+#++:++#+  +#+    +:+ +#+  +:+  +#+ +#++:++#+  +#++:++#++",
+        r"+#+    +#+ +#+    +#+ +#+       +#+ +#+    +#+        +#+",
+        r"#+#    #+# #+#    #+# #+#       #+# #+#    #+# #+#    #+#",
+        r"#########   ########  ###       ### #########   ######## ",
+    ];
+
+    let (term_cols, term_rows) = terminal::size().unwrap_or((80, 24));
+    let logo_width = logo.iter().map(|l| l.len()).max().unwrap_or(0) as u16;
+    let logo_height = logo.len() as u16;
+
+    // Center vertically, leaving room for the status lines below
+    let start_row = term_rows.saturating_sub(logo_height + 4) / 2;
+
+    execute!(stdout, Clear(ClearType::All))?;
+
+    // Draw logo with gradient: bright yellow (top) to deep red (bottom)
+    let gradient: [Color; 7] = [
+        Color::Rgb { r: 255, g: 255, b: 0 },   // bright yellow
+        Color::Rgb { r: 255, g: 200, b: 0 },   // golden yellow
+        Color::Rgb { r: 255, g: 150, b: 0 },   // orange
+        Color::Rgb { r: 230, g: 100, b: 0 },   // dark orange
+        Color::Rgb { r: 200, g: 50, b: 0 },    // red-orange
+        Color::Rgb { r: 170, g: 20, b: 0 },    // dark red
+        Color::Rgb { r: 139, g: 0, b: 0 },     // deep red
+    ];
+    for (i, line) in logo.iter().enumerate() {
+        let col = term_cols.saturating_sub(logo_width) / 2;
+        queue!(
+            stdout,
+            MoveTo(col, start_row + i as u16),
+            SetForegroundColor(gradient[i]),
+        )?;
+        write!(stdout, "{line}")?;
+    }
+
+    // Status text below logo
+    let status = format!("Waiting for other players to connect... ({}/{})", joined, needed);
+    let status_col = term_cols.saturating_sub(status.len() as u16) / 2;
+    queue!(
+        stdout,
+        MoveTo(status_col, start_row + logo_height + 2),
+        SetForegroundColor(Color::White),
+    )?;
+    write!(stdout, "{status}")?;
+
+    let player_info = format!("You are Player {}", player_id + 1);
+    let info_col = term_cols.saturating_sub(player_info.len() as u16) / 2;
+    queue!(
+        stdout,
+        MoveTo(info_col, start_row + logo_height + 3),
+        SetForegroundColor(PLAYER_COLORS[player_id as usize % PLAYER_COLORS.len()]),
+    )?;
+    write!(stdout, "{player_info}")?;
+
+    queue!(stdout, ResetColor)?;
+    stdout.flush()?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let stream = TcpStream::connect("127.0.0.1:9000").await?;
@@ -394,23 +458,23 @@ async fn main() -> io::Result<()> {
         }
     };
 
+    // Enter raw mode and alternate screen
+    let mut stdout = io::stdout();
+    terminal::enable_raw_mode()?;
+    execute!(stdout, EnterAlternateScreen, Hide)?;
+
     // Check for WaitingForPlayers
     let first_state: Option<ServerMsg> = {
         let msg: ServerMsg = recv_msg(&mut reader).await?;
         match msg {
-            ServerMsg::WaitingForPlayers => {
+            ServerMsg::WaitingForPlayers { joined, needed } => {
                 eprintln!("[client] Waiting for other players...");
-                println!("Waiting for other players to connect...");
+                display_lobby_screen(&mut stdout, player_id, joined, needed)?;
                 None
             }
             other => Some(other),
         }
     };
-
-    // Enter raw mode and alternate screen
-    let mut stdout = io::stdout();
-    terminal::enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen, Hide)?;
 
     let result =
         run_game_loop(&mut reader, &mut writer, &mut stdout, player_id, first_state).await;
@@ -531,8 +595,8 @@ fn handle_server_msg(
         ServerMsg::PlayerDisconnected { player_id: pid } => {
             *status_msg = Some(format!("Player {} disconnected", pid + 1));
         }
-        ServerMsg::WaitingForPlayers => {
-            *status_msg = Some("Waiting for players...".to_string());
+        ServerMsg::WaitingForPlayers { joined, needed } => {
+            display_lobby_screen(stdout, player_id, joined, needed)?;
         }
         ServerMsg::Welcome { .. } => {}
     }
