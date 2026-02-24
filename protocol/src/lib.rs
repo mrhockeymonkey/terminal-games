@@ -373,7 +373,10 @@ pub enum ServerMsg {
     Welcome {
         player_id: u8,
     },
-    WaitingForPlayers,
+    WaitingForPlayers {
+        joined: u8,
+        needed: u8,
+    },
     /// Full game state broadcast (sent every tick during play).
     State(GameState),
     RoundStart {

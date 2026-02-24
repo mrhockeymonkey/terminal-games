@@ -53,9 +53,15 @@ async fn main() -> std::io::Result<()> {
         // Send Welcome
         send_msg(&mut writer, &ServerMsg::Welcome { player_id: i as u8 }).await?;
 
-        // If not all players yet, send WaitingForPlayers
+        // If not all players yet, send WaitingForPlayers to all connected players
         if i < NUM_PLAYERS - 1 {
-            send_msg(&mut writer, &ServerMsg::WaitingForPlayers).await?;
+            let joined = (i + 1) as u8;
+            let needed = NUM_PLAYERS as u8;
+            send_msg(&mut writer, &ServerMsg::WaitingForPlayers { joined, needed }).await?;
+            // Notify already-waiting players of the updated count
+            for w in writers.iter_mut() {
+                send_msg(w, &ServerMsg::WaitingForPlayers { joined, needed }).await?;
+            }
         }
 
         writers.push(writer);
